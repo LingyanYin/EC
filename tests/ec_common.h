@@ -39,6 +39,8 @@
 #include <jerasure/reed_sol.h>
 #include <gf_complete.h>
 
+#define NUM_THR 28
+
 struct ec_mr {
 	uint8_t				*buf;
 	struct ibv_mr			*mr;
@@ -50,12 +52,12 @@ struct ec_context {
 	struct ibv_pd			*pd;
 	struct ibv_exp_ec_calc		*calc;
 	struct ibv_exp_ec_calc_init_attr attr;
-	int				block_size;
-	struct ec_mr			data;
-	struct ec_mr			code;
-	uint8_t 			**data_arr;
-	uint8_t 			**code_arr;
-	struct ibv_exp_ec_mem		mem;
+	int				block_size[NUM_THR];
+	struct ec_mr			data[NUM_THR];
+	struct ec_mr			code[NUM_THR];
+	uint8_t 			**data_arr[NUM_THR];
+	uint8_t 			**code_arr[NUM_THR];
+	struct ibv_exp_ec_mem		mem[NUM_THR];
 	uint8_t				*en_mat;
 	uint8_t				*de_mat;
 	int				*encode_matrix;
@@ -75,7 +77,7 @@ struct ec_context *alloc_ec_ctx(struct ibv_pd *pd, int frame_size,
 				int max_inflight_calcs,
 				char *failed_blocks);
 void free_ec_ctx(struct ec_context *ctx);
-int sw_ec_encode(struct ec_context *ctx);
+int sw_ec_encode(struct ec_context *ctx, int mytid);
 void close_ec_ctx(struct ec_context *ctx);
 void print_matrix_int(int *m, int rows, int cols);
 void print_matrix_u8(uint8_t *m, int rows, int cols);

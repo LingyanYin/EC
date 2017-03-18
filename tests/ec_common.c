@@ -237,85 +237,97 @@ err_demat:
 
 static void free_ec_mrs(struct ec_context *ctx)
 {
-	ibv_dereg_mr(ctx->data.mr);
-	ibv_dereg_mr(ctx->code.mr);
-	free(ctx->data.buf);
-	free(ctx->code.buf);
+	int i;
+	for (i=0; i<NUM_THR; i++) {
+		ibv_dereg_mr(ctx->data[i].mr);
+		ibv_dereg_mr(ctx->code[i].mr);
+		free(ctx->data[i].buf);
+		free(ctx->code[i].buf);
+	}
 }
 
 static int alloc_ec_mrs(struct ec_context *ctx)
 {
 	int dsize, csize, i;
 
-	dsize = ctx->block_size * ctx->attr.k;
-	csize = ctx->block_size * ctx->attr.m;
-	info_log("data_size=%d, code_size=%d block_size=%d\n",
-		dsize, csize, ctx->block_size);
+	int j;
+	for (j=0; j<NUM_THR; j++) {
+		dsize = ctx->block_size[j] * ctx->attr.k;
+		csize = ctx->block_size[j] * ctx->attr.m;
+		info_log("data_size=%d, code_size=%d block_size=%d\n",
+			dsize, csize, ctx->block_size[j]);
 
-	ctx->data.buf = calloc(1, dsize);
-	if (!ctx->data.buf) {
-		err_log("Failed to allocate data buffer\n");
-		return -ENOMEM;
+		ctx->data[j].buf = calloc(1, dsize);
+		if (!ctx->data[j].buf) {
+			err_log("Failed to allocate data buffer\n");
+			return -ENOMEM;
+		}
+
+		ctx->data[j].mr = ibv_reg_mr(ctx->pd, ctx->data[j].buf,
+					  dsize, IBV_ACCESS_LOCAL_WRITE);
+		if (!ctx->data[j].mr) {
+			err_log("Failed to allocate data MR\n");
+			goto free_dbuf;
+		}
+
+		ctx->data[j].sge = calloc(ctx->attr.k, sizeof(*ctx->data[j].sge));
+		if (!ctx->data[j].sge) {
+			err_log("Failed to allocate data sges\n");
+			goto free_dbuf;
+		}
+
+		for (i = 0; i < ctx->attr.k; i++) {
+			ctx->data[j].sge[i].lkey = ctx->data[j].mr->lkey;
+			ctx->data[j].sge[i].addr = (uintptr_t)ctx->data[j].buf + i * ctx->block_size[j];
+			ctx->data[j].sge[i].length = ctx->block_size[j];
+		}
+
+		ctx->code[j].buf = calloc(1, csize);
+		if (!ctx->code[j].buf) {
+			err_log("Failed to allocate code buffer\n");
+			goto dereg_dmr;
+		}
+
+		ctx->code[j].mr = ibv_reg_mr(ctx->pd, ctx->code[j].buf, csize,
+					  IBV_ACCESS_LOCAL_WRITE);
+		if (!ctx->code[j].mr) {
+			err_log("Failed to allocate code MR\n");
+			goto free_cbuf;
+		}
+
+		ctx->code[j].sge = calloc(ctx->attr.m, sizeof(*ctx->code[j].sge));
+		if (!ctx->code[j].sge) {
+			err_log("Failed to allocate code sges\n");
+			goto free_dbuf;
+		}
+
+		for (i = 0; i < ctx->attr.m; i++) {
+			ctx->code[j].sge[i].lkey = ctx->code[j].mr->lkey;
+			ctx->code[j].sge[i].addr = (uintptr_t)ctx->code[j].buf + i * ctx->block_size[j];
+			ctx->code[j].sge[i].length = ctx->block_size[j];
+		}
+
+		ctx->mem[j].data_blocks = ctx->data[j].sge;
+		ctx->mem[j].num_data_sge = ctx->attr.k;
+		ctx->mem[j].code_blocks = ctx->code[j].sge;
+		ctx->mem[j].num_code_sge = ctx->attr.m;
+		ctx->mem[j].block_size = ctx->block_size[j];
 	}
-
-	ctx->data.mr = ibv_reg_mr(ctx->pd, ctx->data.buf,
-				  dsize, IBV_ACCESS_LOCAL_WRITE);
-	if (!ctx->data.mr) {
-		err_log("Failed to allocate data MR\n");
-		goto free_dbuf;
-	}
-
-	ctx->data.sge = calloc(ctx->attr.k, sizeof(*ctx->data.sge));
-	if (!ctx->data.sge) {
-		err_log("Failed to allocate data sges\n");
-		goto free_dbuf;
-	}
-
-	for (i = 0; i < ctx->attr.k; i++) {
-		ctx->data.sge[i].lkey = ctx->data.mr->lkey;
-		ctx->data.sge[i].addr = (uintptr_t)ctx->data.buf + i * ctx->block_size;
-		ctx->data.sge[i].length = ctx->block_size;
-	}
-
-	ctx->code.buf = calloc(1, csize);
-	if (!ctx->code.buf) {
-		err_log("Failed to allocate code buffer\n");
-		goto dereg_dmr;
-	}
-
-	ctx->code.mr = ibv_reg_mr(ctx->pd, ctx->code.buf, csize,
-				  IBV_ACCESS_LOCAL_WRITE);
-	if (!ctx->code.mr) {
-		err_log("Failed to allocate code MR\n");
-		goto free_cbuf;
-	}
-
-	ctx->code.sge = calloc(ctx->attr.m, sizeof(*ctx->code.sge));
-	if (!ctx->code.sge) {
-		err_log("Failed to allocate code sges\n");
-		goto free_dbuf;
-	}
-
-	for (i = 0; i < ctx->attr.m; i++) {
-		ctx->code.sge[i].lkey = ctx->code.mr->lkey;
-		ctx->code.sge[i].addr = (uintptr_t)ctx->code.buf + i * ctx->block_size;
-		ctx->code.sge[i].length = ctx->block_size;
-	}
-
-	ctx->mem.data_blocks = ctx->data.sge;
-	ctx->mem.num_data_sge = ctx->attr.k;
-	ctx->mem.code_blocks = ctx->code.sge;
-	ctx->mem.num_code_sge = ctx->attr.m;
-	ctx->mem.block_size = ctx->block_size;
 
 	return 0;
 
 free_dbuf:
-	free(ctx->data.buf);
+	for (j=0; j<NUM_THR; j++) {
+		free(ctx->data[j].buf);
+	}
 dereg_dmr:
-	ibv_dereg_mr(ctx->data.mr);
+	for (j=0; j<NUM_THR; j++) {
+		ibv_dereg_mr(ctx->data[j].mr);
+	}
 free_cbuf:
-	free(ctx->code.buf);
+	for (j=0; j<NUM_THR; j++) {
+		free(ctx->code[j].buf);
+	}
 
 	return -ENOMEM;
 }
@@ -371,7 +383,11 @@ struct ec_context *alloc_ec_ctx(struct ibv_pd *pd, int frame_size,
 	ctx->attr.max_data_sge = k;
 	ctx->attr.max_code_sge = m;
 	ctx->attr.affinity_hint = 0;
-	ctx->block_size = align_any((frame_size + ctx->attr.k - 1) / ctx->attr.k, 64);
+	int i;
+	for (i=0; i<NUM_THR; i++) {
+		ctx->block_size[i] = align_any((frame_size + ctx->attr.k - 1) / ctx->attr.k, 64);
+		info_log("ctx->block_size[%d] %d\n", i, ctx->block_size[i]);
+	}
 
 	err = alloc_ec_mrs(ctx);
 	if (err)
@@ -452,12 +468,12 @@ uint8_t galois_w4_mult(uint8_t x, uint8_t y4)
 
 }
 
-int sw_ec_encode(struct ec_context *ctx)
+int sw_ec_encode(struct ec_context *ctx, int mytid)
 {
-	uint8_t *data = (uint8_t *)ctx->data.buf;
-	uint8_t *code = (uint8_t *)ctx->code.buf;
+	uint8_t *data = (uint8_t *)ctx->data[mytid].buf;
+	uint8_t *code = (uint8_t *)ctx->code[mytid].buf;
 	uint8_t *matrix = (uint8_t *)ctx->attr.encode_matrix;
-	int block_size = ctx->block_size, index, offset;
+	int block_size = ctx->block_size[mytid], index, offset;
 	int i, j, m = ctx->attr.m;
 
 	for (i = 0; i < block_size * ctx->attr.k; i++) {

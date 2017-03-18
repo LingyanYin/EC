@@ -32,26 +32,40 @@
 
 #include "ec_common.h"
 #include <eco_encoder.h>
+#include <pthread.h>
+#include "../util/atomics.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 struct encoder_context {
 	struct ibv_context	*context;
 	struct ibv_pd		*pd;
 	struct ec_context	*ec_ctx;
 	int			infd;
-	int			outfd_sw;
-	int			outfd_verbs;
-	int			outfd_eco;
+	int			outfd_sw[NUM_THR];
+	int			outfd_verbs[NUM_THR];
+	int			outfd_eco[NUM_THR];
 };
+
+
+struct encoder_context *ctx;
+struct ibv_device *device;
+struct inargs in;
+struct eco_encoder *lib_encoder;
 
 static void close_io_files(struct encoder_context *ctx)
 {
-	close(ctx->outfd_sw);
-	close(ctx->outfd_verbs);
-	close(ctx->outfd_eco);
+	int i;
+	for (i=0; i<NUM_THR; i++) {
+		close(ctx->outfd_sw[i]);
+		close(ctx->outfd_verbs[i]);
+		close(ctx->outfd_eco[i]);
+	}
 	close(ctx->infd);
 }
 
-static int open_io_files(struct inargs *in, struct encoder_context *ctx)
+static int open_io_files(struct inargs *in, struct encoder_context *ctx, int mytid)
 {
 	char *outfile;
 	int err = 0;
@@ -62,18 +76,24 @@ static int open_io_files(struct inargs *in, struct encoder_context *ctx)
 		return -EIO;
 	}
 
-	outfile = calloc(1, strlen(in->datafile) + strlen(".encode.code.verbs") + 1);
+	outfile = calloc(1, strlen(in->datafile) + strlen(".encode.code.verbs") + 5 + 1);
 	if (!outfile) {
 		err_log("Failed to alloc outfile\n");
 		err = -ENOMEM;
 		goto close_infd;
 	}
 
+	char tid[4];
+	memset(tid, 0, sizeof(char)*4);
+	//itoa(mytid, tid, 10);
+	snprintf(tid, 4,"%d",mytid);
 	outfile = strcat(outfile, in->datafile);
+	outfile = strcat(outfile, ".");
+	outfile = strcat(outfile, tid);
 	outfile = strcat(outfile, ".encode.code.verbs");
 	unlink(outfile);
-	ctx->outfd_verbs = open(outfile, O_RDWR | O_CREAT, 0666);
-	if (ctx->outfd_verbs < 0) {
+	ctx->outfd_verbs[mytid] = open(outfile, O_RDWR | O_CREAT, 0666);
+	if (ctx->outfd_verbs[mytid] < 0) {
 		err_log("Failed to open verbs code file");
 		free(outfile);
 		err = -EIO;
@@ -81,7 +101,7 @@ static int open_io_files(struct inargs *in, struct encoder_context *ctx)
 	}
 	free(outfile);
 
-	outfile = calloc(1, strlen(in->datafile) + strlen(".encode.code.sw") + 1);
+	outfile = calloc(1, strlen(in->datafile) + strlen(".encode.code.sw") + 5 + 1);
 	if (!outfile) {
 		err_log("Failed to alloc outfile\n");
 		err = -ENOMEM;
@@ -89,10 +109,12 @@ static int open_io_files(struct inargs *in, struct encoder_context *ctx)
 	}
 
 	outfile = strcat(outfile, in->datafile);
+	outfile = strcat(outfile, ".");
+	outfile = strcat(outfile, tid);
 	outfile = strcat(outfile, ".encode.code.sw");
 	unlink(outfile);
-	ctx->outfd_sw = open(outfile, O_RDWR | O_CREAT, 0666);
-	if (ctx->outfd_sw < 0) {
+	ctx->outfd_sw[mytid] = open(outfile, O_RDWR | O_CREAT, 0666);
+	if (ctx->outfd_sw[mytid] < 0) {
 		err_log("Failed to open sw code file");
 		free(outfile);
 		err = -EIO;
@@ -100,7 +122,7 @@ static int open_io_files(struct inargs *in, struct encoder_context *ctx)
 	}
 	free(outfile);
 
-	outfile = calloc(1, strlen(in->datafile) + strlen(".encode.code.eco") + 1);
+	outfile = calloc(1, strlen(in->datafile) + strlen(".encode.code.eco") + 5 + 1);
 	if (!outfile) {
 		err_log("Failed to alloc outfile\n");
 		err = -ENOMEM;
@@ -108,10 +130,12 @@ static int open_io_files(struct inargs *in, struct encoder_context *ctx)
 	}
 
 	outfile = strcat(outfile, in->datafile);
+	outfile = strcat(outfile, ".");
+	outfile = strcat(outfile, tid);
 	outfile = strcat(outfile, ".encode.code.eco");
 	unlink(outfile);
-	ctx->outfd_eco = open(outfile, O_RDWR | O_CREAT, 0666);
-	if (ctx->outfd_eco < 0) {
+	ctx->outfd_eco[mytid] = open(outfile, O_RDWR | O_CREAT, 0666);
+	if (ctx->outfd_eco[mytid] < 0) {
 		err_log("Failed to open eco code file");
 		free(outfile);
 		err = -EIO;
@@ -159,9 +183,12 @@ init_ctx(struct ibv_device *ib_dev, struct inargs *in)
 		goto dealloc_pd;
 	}
 
-	err = open_io_files(in, ctx);
-	if (err)
-		goto free_ec;
+	int i;
+	for (i=0; i<NUM_THR; i++) {
+		err = open_io_files(in, ctx, i);
+		if (err)
+			goto free_ec;
+	}
 
 	return ctx;
 
@@ -241,85 +268,99 @@ static int process_inargs(int argc, char *argv[], struct inargs *in)
 	return 0;
 }
 
-static int encode_file(struct encoder_context *ctx, struct eco_encoder *lib_encoder)
+static int encode_file(struct encoder_context *ctx, struct eco_encoder *lib_encoder, int mytid)
 {
 	struct ec_context *ec_ctx = ctx->ec_ctx;
 	int bytes;
 	int err;
 
 	while (1) {
-		bytes = read(ctx->infd, ec_ctx->data.buf,
-				ec_ctx->block_size * ec_ctx->attr.k);
+		bytes = read(ctx->infd, ec_ctx->data[mytid].buf,
+				ec_ctx->block_size[mytid] * ec_ctx->attr.k);
 		if (bytes <= 0)
 			break;
 
-		err = ibv_exp_ec_encode_sync(ec_ctx->calc, &ec_ctx->mem);
+		err = ibv_exp_ec_encode_sync(ec_ctx->calc, &ec_ctx->mem[mytid]);
 		if (err) {
 			err_log("Failed ibv_exp_ec_encode (%d)\n", err);
 			return err;
 		}
 
-		bytes = write(ctx->outfd_verbs, ec_ctx->code.buf,
-				ec_ctx->block_size * ec_ctx->attr.m);
-		if (bytes < (int)ec_ctx->block_size * ec_ctx->attr.m) {
+		bytes = write(ctx->outfd_verbs[mytid], ec_ctx->code[mytid].buf,
+				ec_ctx->block_size[mytid] * ec_ctx->attr.m);
+		if (bytes < (int)ec_ctx->block_size[mytid] * ec_ctx->attr.m) {
 			err_log("Failed write to fd1 (%d)\n", err);
 			return err;
 		}
 
-		memset(ec_ctx->code.buf, 0, ec_ctx->block_size * ec_ctx->attr.m);
-		err = sw_ec_encode(ec_ctx);
+		memset(ec_ctx->code[mytid].buf, 0, ec_ctx->block_size[mytid] * ec_ctx->attr.m);
+		err = sw_ec_encode(ec_ctx, mytid);
 		if (err) {
 			err_log("Failed sw_ec_encode (%d)\n", err);
 			return err;
 		}
 
-		bytes = write(ctx->outfd_sw, ec_ctx->code.buf,
-				ec_ctx->block_size * ec_ctx->attr.m);
-		if (bytes < (int)ec_ctx->block_size * ec_ctx->attr.m) {
+		bytes = write(ctx->outfd_sw[mytid], ec_ctx->code[mytid].buf,
+				ec_ctx->block_size[mytid] * ec_ctx->attr.m);
+		if (bytes < (int)ec_ctx->block_size[mytid] * ec_ctx->attr.m) {
 			err_log("Failed write to fd2 (%d)\n", err);
 			return err;
 		}
 
 		// library encode
-		memset(ec_ctx->code.buf, 0, ec_ctx->block_size * ec_ctx->attr.m);
-		err = mlx_eco_encoder_encode(lib_encoder, ec_ctx->data_arr, ec_ctx->code_arr, ec_ctx->attr.k, ec_ctx->attr.m, ec_ctx->block_size, 0);
-		bytes = write(ctx->outfd_eco, ec_ctx->code.buf,
-				ec_ctx->block_size * ec_ctx->attr.m);
-		if (bytes < (int)ec_ctx->block_size * ec_ctx->attr.m) {
+		memset(ec_ctx->code[mytid].buf, 0, ec_ctx->block_size[mytid] * ec_ctx->attr.m);
+		err = mlx_eco_encoder_encode(lib_encoder, ec_ctx->data_arr[mytid], ec_ctx->code_arr[mytid], ec_ctx->attr.k, ec_ctx->attr.m, ec_ctx->block_size[mytid], mytid);
+		bytes = write(ctx->outfd_eco[mytid], ec_ctx->code[mytid].buf,
+				ec_ctx->block_size[mytid] * ec_ctx->attr.m);
+		if (bytes < (int)ec_ctx->block_size[mytid] * ec_ctx->attr.m) {
 			err_log("Failed write to library fd (%d)\n", err);
 			return err;
 		}
 		// done
-		memset(ec_ctx->data.buf, 0, ec_ctx->block_size * ec_ctx->attr.k);
-		memset(ec_ctx->code.buf, 0, ec_ctx->block_size * ec_ctx->attr.m);
+		memset(ec_ctx->data[mytid].buf, 0, ec_ctx->block_size[mytid] * ec_ctx->attr.k);
+		memset(ec_ctx->code[mytid].buf, 0, ec_ctx->block_size[mytid] * ec_ctx->attr.m);
 	}
 
 	return 0;
 }
 
-static void set_buffers(struct encoder_context *ctx)
+static void set_buffers(struct encoder_context *ctx, int mytid)
 {
 	struct ec_context *ec_ctx = ctx->ec_ctx;
 	int i;
 
-	ec_ctx->data_arr = calloc(ec_ctx->attr.k, sizeof(*ec_ctx->data_arr));
-	ec_ctx->code_arr = calloc(ec_ctx->attr.m, sizeof(*ec_ctx->code_arr));
+	ec_ctx->data_arr[mytid] = calloc(ec_ctx->attr.k, sizeof(*ec_ctx->data_arr[mytid]));
+	ec_ctx->code_arr[mytid] = calloc(ec_ctx->attr.m, sizeof(*ec_ctx->code_arr[mytid]));
 
 	for (i = 0; i < ec_ctx->attr.k ; i++) {
-		ec_ctx->data_arr[i] = ec_ctx->data.buf + i * ec_ctx->block_size;
+		ec_ctx->data_arr[mytid][i] = ec_ctx->data[mytid].buf + i * ec_ctx->block_size[mytid];
 	}
 	for (i = 0; i < ec_ctx->attr.m ; i++) {
-		ec_ctx->code_arr[i] = ec_ctx->code.buf + i * ec_ctx->block_size;
+		ec_ctx->code_arr[mytid][i] = ec_ctx->code[mytid].buf + i * ec_ctx->block_size[mytid];
 	}
 }
 
+void* encode_call(void* threadid){
+	int* tid = (int*)threadid;
+	int mytid = *tid;
+	printf("mytid: %d\n", mytid);
+	// register buffers
+	int err = mlx_eco_encoder_register(lib_encoder, ctx->ec_ctx->data_arr[mytid], ctx->ec_ctx->code_arr[mytid], in.k, in.m, ctx->ec_ctx->block_size[mytid], mytid);
+	if (err) {
+		err_log("mlx_ec_register_mrs failed to register\n");
+		exit(-1);
+	}
+
+	// encode data
+	err = encode_file(ctx, lib_encoder, mytid);
+	if (err)
+		err_log("failed to encode file %s\n", in.datafile);
+	return NULL;
+}
 
 int main(int argc, char *argv[])
 {
-	struct encoder_context *ctx;
-	struct ibv_device *device;
-	struct inargs in;
-	int err;
+	int err, i;
 
 	err = process_inargs(argc, argv, &in);
 	if (err)
@@ -333,32 +374,56 @@ int main(int argc, char *argv[])
 	if (!ctx)
 		return -ENOMEM;
 
-	set_buffers(ctx);
+	for (i=0; i<NUM_THR; i++) {
+		set_buffers(ctx, i);
+	}
 
 	// library init
-	struct eco_encoder *lib_encoder = mlx_eco_encoder_init(in.k, in.m, 1);	
+	lib_encoder = mlx_eco_encoder_init(in.k, in.m, 1);	
 	if (!lib_encoder) {
 		err_log("mlx_eco_encoder_init failed\n");
 		return -ENOMEM;
 	}
 
-	// register buffers
-	err = mlx_eco_encoder_register(lib_encoder, ctx->ec_ctx->data_arr, ctx->ec_ctx->code_arr, in.k, in.m, ctx->ec_ctx->block_size, 0);
-	if (err) {
-		err_log("mlx_ec_register_mrs failed to register\n");
-		return -ENOMEM;
+	printf("before pthread create\n");
+    /**
+     * pthread begining here
+     */
+    pthread_t threads[NUM_THR];
+    pthread_attr_t attr;
+    void *status;
+    int rt;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+
+	int threadid[NUM_THR];
+	for (i=0; i<NUM_THR; i++) {
+		threadid[i] = i;
+		printf("threadid: %d\n", threadid[i]);
+		rt = pthread_create(&threads[i], &attr, encode_call, (void*) &threadid[i]);
+		if (rt) {
+			perror("pthread_create error");
+			exit(-1);
+		}
 	}
-
-	// encode data
-	err = encode_file(ctx, lib_encoder);
-	if (err)
-		err_log("failed to encode file %s\n", in.datafile);
-
+	//int mytid = atomic_increment(&threadid, 1);
+	//printf("threadid: %d\n", mytid);
+	
+	for (i=0; i<NUM_THR; i++) {
+		rt = pthread_join(threads[i], &status);
+		if (rt) {
+			perror("pthread_join error");
+			exit(-1);
+		}
+	}
+	pthread_attr_destroy(&attr);
 
 	mlx_eco_encoder_release(lib_encoder);
 
-	free(ctx->ec_ctx->data_arr);
-	free(ctx->ec_ctx->code_arr);
+	for (i=0; i<NUM_THR; i++) {
+		free(ctx->ec_ctx->data_arr[i]);
+		free(ctx->ec_ctx->code_arr[i]);
+	}
 
 	close_ctx(ctx);
 
