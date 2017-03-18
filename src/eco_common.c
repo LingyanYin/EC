@@ -18,6 +18,7 @@
 #include "../include/eco_common.h"
 #include <jerasure/reed_sol.h>
 #include <jerasure/cauchy.h>
+#include <assert.h>
 
 #define MAX_INFLIGHT_CALCS 2
 
@@ -189,12 +190,12 @@ static inline void util_mlx_eco_update_sge(struct ibv_sge *sge, uint8_t *addr, u
  * @param sge                        Pointer to a source sge.
  * @return                           0 successful, other fail.
  */
-static inline int utill_mlx_eco_alloc_mr(struct eco_context *eco_ctx, uint8_t *buffer, struct ibv_sge *sge)
+static inline int utill_mlx_eco_alloc_mr(struct eco_context *eco_ctx, uint8_t *buffer, struct ibv_sge *sge, int threadid)
 {
-	dbg_log("utill_mlx_eco_alloc_mr: eco_ctx = %p , buffer = %p block_size = %d\n", eco_ctx, buffer, eco_ctx->alignment_mem.block_size);
+	dbg_log("utill_mlx_eco_alloc_mr: eco_ctx = %p , buffer = %p block_size = %d\n", eco_ctx, buffer, eco_ctx->alignment_mem[threadid].block_size);
 
 	struct ibv_mr *mr;
-	int block_size = eco_ctx->alignment_mem.block_size;
+	int block_size = eco_ctx->alignment_mem[threadid].block_size;
 
 	mr = ibv_reg_mr(eco_ctx->calc->pd, buffer, block_size, IBV_ACCESS_LOCAL_WRITE);
 	if (!mr) {
@@ -203,7 +204,7 @@ static inline int utill_mlx_eco_alloc_mr(struct eco_context *eco_ctx, uint8_t *b
 	}
 
 	util_mlx_eco_update_sge(sge, buffer, block_size, mr->lkey);
-	eco_list_add(&eco_ctx->mrs_list, mr);
+	eco_list_add(&eco_ctx->mrs_list[threadid], mr);
 
 	dbg_log("utill_mlx_eco_alloc_mr: completed successfully - eco_ctx = %p , buffer = %p block_size = %d\n", eco_ctx, buffer, block_size);
 
@@ -223,12 +224,12 @@ static inline int utill_mlx_eco_alloc_mr(struct eco_context *eco_ctx, uint8_t *b
  * @param buffers_array_size         The size of the buffers array.
  * @return                           0 successful, other fail.
  */
-static int utill_mlx_eco_alloc_mrs(struct eco_context *eco_ctx, uint8_t **buffers_array, struct ibv_sge *sges, int *num_sges, int buffers_array_size)
+static int utill_mlx_eco_alloc_mrs(struct eco_context *eco_ctx, uint8_t **buffers_array, struct ibv_sge *sges, int *num_sges, int buffers_array_size, int threadid)
 {
-	dbg_log("utill_mlx_eco_alloc_mrs: eco_ctx = %p , buffers_array = %p block_size = %d buffers_array_size = %d\n", eco_ctx, buffers_array, eco_ctx->alignment_mem.block_size, buffers_array_size);
+	dbg_log("utill_mlx_eco_alloc_mrs: eco_ctx = %p , buffers_array = %p block_size = %d buffers_array_size = %d\n", eco_ctx, buffers_array, eco_ctx->alignment_mem[threadid].block_size, buffers_array_size);
 
 	int i, err;
-	uint32_t block_size = eco_ctx->alignment_mem.block_size;
+	uint32_t block_size = eco_ctx->alignment_mem[threadid].block_size;
 	uint64_t buffer_addres_u64;
 	struct ibv_mr * mr;
 
@@ -248,11 +249,11 @@ static int utill_mlx_eco_alloc_mrs(struct eco_context *eco_ctx, uint8_t **buffer
 		}
 
 		// else search for the mr in the list or call reg_mr
-		mr = eco_list_get_mr(&eco_ctx->mrs_list, buffers_array[i], block_size);
+		mr = eco_list_get_mr(&eco_ctx->mrs_list[threadid], buffers_array[i], block_size);
 		if (mr) {
 			util_mlx_eco_update_sge(sges, buffers_array[i], block_size, mr->lkey);
 		} else {
-			err = utill_mlx_eco_alloc_mr(eco_ctx, buffers_array[i], sges);
+			err = utill_mlx_eco_alloc_mr(eco_ctx, buffers_array[i], sges, threadid);
 			if (err) {
 				return err;
 			}
@@ -273,11 +274,12 @@ static int utill_mlx_eco_alloc_mrs(struct eco_context *eco_ctx, uint8_t **buffer
  * @param is_remainder_comp          Boolean variable which determine the type of the completion context.
  * @param comp_done_func             Pointer to the comp_done_func.
  */
-static void util_mlx_eco_set_comp(void *coder, struct eco_coder_comp *comp, int is_remainder_comp, void (*comp_done_func)(struct ibv_exp_ec_comp *))
+static void util_mlx_eco_set_comp(void *coder, struct eco_coder_comp *comp, int is_remainder_comp, void (*comp_done_func)(struct ibv_exp_ec_comp *), int threadid)
 {
 	comp->comp.done = comp_done_func;
 	comp->eco_coder = coder;
 	comp->is_remainder_comp = is_remainder_comp;
+	comp->threadid = threadid;
 }
 
 /**
@@ -288,25 +290,26 @@ static void util_mlx_eco_set_comp(void *coder, struct eco_coder_comp *comp, int 
  * @param k                          Number of data blocks.
  * @param m                          Number of code blocks.
  */
-static int util_mlx_eco_init_remainder_mem(struct eco_context *eco_ctx, struct ibv_pd *pd, int k, int m)
+static int util_mlx_eco_init_remainder_mem(struct eco_context *eco_ctx, struct ibv_pd *pd, int k, int m, int threadid)
 {
 	int i, err;
 
-	eco_ctx->remainder_buffers = calloc(k + m, 64);
-	if (!eco_ctx->remainder_buffers) {
+	assert(threadid < MAX_THREADS);
+	eco_ctx->remainder_buffers[threadid] = calloc(k + m, 64);
+	if (!eco_ctx->remainder_buffers[threadid]) {
 		err_log("mlx_eco_init: Failed to allocate alignment buffers\n");
 		err = -ENOMEM;
 		goto remainder_buffers_error;
 	}
-	err = util_mlx_eco_init_mem(&eco_ctx->remainder_mem, k, m);
+	err = util_mlx_eco_init_mem(&eco_ctx->remainder_mem[threadid], k, m);
 	if (err) {
 		goto init_eco_mem_error;
 	}
 
-	eco_ctx->remainder_mem.block_size = 64;
+	eco_ctx->remainder_mem[threadid].block_size = 64;
 
-	eco_ctx->remainder_mr = ibv_reg_mr(pd, eco_ctx->remainder_buffers, (k + m) * 64, IBV_ACCESS_LOCAL_WRITE);
-	if (!eco_ctx->remainder_mr) {
+	eco_ctx->remainder_mr[threadid] = ibv_reg_mr(pd, eco_ctx->remainder_buffers[threadid], (k + m) * 64, IBV_ACCESS_LOCAL_WRITE);
+	if (!eco_ctx->remainder_mr[threadid]) {
 		err_log("mlx_eco_init: Failed to allocate alignment MR\n");
 		err = -ENOMEM;
 		goto remainder_mr_error;
@@ -314,28 +317,29 @@ static int util_mlx_eco_init_remainder_mem(struct eco_context *eco_ctx, struct i
 
 
 	for (i = 0 ; i < k ; i++) {
-		util_mlx_eco_update_sge(&eco_ctx->remainder_mem.data_blocks[i], eco_ctx->remainder_buffers + i * 64, 64, eco_ctx->remainder_mr->lkey);
+		util_mlx_eco_update_sge(&eco_ctx->remainder_mem[threadid].data_blocks[i], eco_ctx->remainder_buffers[threadid] + i * 64, 64, eco_ctx->remainder_mr[threadid]->lkey);
 	}
 
 	for (i = 0 ; i < m ; i++) {
-		util_mlx_eco_update_sge(&eco_ctx->remainder_mem.code_blocks[i], eco_ctx->remainder_buffers + ((k + i) * 64), 64, eco_ctx->remainder_mr->lkey);
+		util_mlx_eco_update_sge(&eco_ctx->remainder_mem[threadid].code_blocks[i], eco_ctx->remainder_buffers[threadid] + ((k + i) * 64), 64, eco_ctx->remainder_mr[threadid]->lkey);
 	}
 
 	return 0;
 
 remainder_mr_error:
-	free(eco_ctx->remainder_mem.code_blocks);
-	free(eco_ctx->remainder_mem.data_blocks);
+	free(eco_ctx->remainder_mem[threadid].code_blocks);
+	free(eco_ctx->remainder_mem[threadid].data_blocks);
 init_eco_mem_error:
-	free(eco_ctx->remainder_buffers);
+	free(eco_ctx->remainder_buffers[threadid]);
 remainder_buffers_error:
 
 	return err;
 }
 
+// now we only support same k,m,use_vandermonde_matrix in each thread
 struct eco_context *mlx_eco_init(void *coder, int k, int m, int use_vandermonde_matrix, void (*comp_done_func)(struct ibv_exp_ec_comp *))
 {
-	dbg_log("mlx_eco_init: k = %d, m = %d, use_vandermonde_matrix = %d\n", k , m, use_vandermonde_matrix);
+	dbg_log("mlx_eco_init: k = %d, m = %d, use_vandermonde_matrix = %d\n", k, m, use_vandermonde_matrix);
 
 	struct eco_context *eco_ctx;
 	struct ibv_context *ibv_context;
@@ -344,6 +348,7 @@ struct eco_context *mlx_eco_init(void *coder, int k, int m, int use_vandermonde_
 	struct ibv_exp_device_attr dattr;
 	uint8_t *encode_matrix;
 	int err;
+	int i;
 
 	// 4-bit field allows us to redundancy blocks as long as k + m <= 16
 	if (k + m > W * W) {
@@ -367,7 +372,7 @@ struct eco_context *mlx_eco_init(void *coder, int k, int m, int use_vandermonde_
 	// allocate pd
 	pd = ibv_alloc_pd(ibv_context);
 	if (!pd) {
-		err_log("mlx_eco_init: Failed to allocate PD\n");
+		err_log("mlx_eco_init: Failed to allocate more PD\n");
 		goto allocate_pd_error;
 	}
 
@@ -401,9 +406,11 @@ struct eco_context *mlx_eco_init(void *coder, int k, int m, int use_vandermonde_
 		goto encode_matrix_error;
 	}
 
-	err = util_mlx_eco_init_remainder_mem(eco_ctx, pd, k, m);
-	if (err) {
-		goto init_remainder_mem_error;
+	for (i=0; i<MAX_THREADS; i++) {
+		err = util_mlx_eco_init_remainder_mem(eco_ctx, pd, k, m, i);
+		if (err) {
+			goto init_remainder_mem_error;
+		}
 	}
 
 	// set cacl initial attributes
@@ -425,9 +432,11 @@ struct eco_context *mlx_eco_init(void *coder, int k, int m, int use_vandermonde_
 	eco_ctx->attr.affinity_hint = 0;
 	eco_ctx->attr.encode_matrix = encode_matrix;
 
-	err = util_mlx_eco_init_mem(&eco_ctx->alignment_mem, k, m);
-	if (err) {
-		goto init_alignment_mem_error;
+	for (i=0; i<MAX_THREADS; i++) {
+		err = util_mlx_eco_init_mem(&eco_ctx->alignment_mem[i], k, m);
+		if (err) {
+			goto init_alignment_mem_error;
+		}
 	}
 
 	err = pthread_mutex_init(&eco_ctx->async_mutex, NULL);
@@ -448,12 +457,16 @@ struct eco_context *mlx_eco_init(void *coder, int k, int m, int use_vandermonde_
 		goto calc_alloc_error;
 	}
 
-	init_eco_list(&eco_ctx->mrs_list);
+	for (i=0; i<MAX_THREADS; i++) {
+		init_eco_list(&eco_ctx->mrs_list[i]);
+	}
 
 	eco_ctx->async_ref_count = 0;
 
-	util_mlx_eco_set_comp(coder, &eco_ctx->alignment_comp, 0, comp_done_func);
-	util_mlx_eco_set_comp(coder, &eco_ctx->remainder_comp, 1, comp_done_func);
+	for (i=0; i<MAX_THREADS; i++) {
+		util_mlx_eco_set_comp(coder, &eco_ctx->alignment_comp[i], 0, comp_done_func, i);
+		util_mlx_eco_set_comp(coder, &eco_ctx->remainder_comp[i], 1, comp_done_func, i);
+	}
 
 	dbg_log("mlx_eco_init: Completed successfully - eco_ctx = %p, k = %d, m = %d, use_vandermonde_matrix = %d\n", eco_ctx, k , m, use_vandermonde_matrix);
 
@@ -464,13 +477,17 @@ calc_alloc_error:
 async_cond_error:
 	pthread_mutex_destroy(&eco_ctx->async_mutex);
 async_mutex_error:
-	free(eco_ctx->alignment_mem.code_blocks);
-	free(eco_ctx->alignment_mem.data_blocks);
+	for (i=0; i<MAX_THREADS; i++) {
+		free(eco_ctx->alignment_mem[i].code_blocks);
+		free(eco_ctx->alignment_mem[i].data_blocks);
+	}
 init_alignment_mem_error:
-	ibv_dereg_mr(eco_ctx->remainder_mr);
-	free(eco_ctx->remainder_mem.code_blocks);
-	free(eco_ctx->remainder_mem.data_blocks);
-	free(eco_ctx->remainder_buffers);
+	for (i=0; i<MAX_THREADS; i++) {
+	ibv_dereg_mr(eco_ctx->remainder_mr[i]);
+		free(eco_ctx->remainder_mem[i].code_blocks);
+		free(eco_ctx->remainder_mem[i].data_blocks);
+		free(eco_ctx->remainder_buffers[i]);
+	}
 init_remainder_mem_error:
 	free(encode_matrix);
 	free(eco_ctx->int_encode_matrix);
@@ -489,7 +506,7 @@ find_device_error:
 	return NULL;
 }
 
-int mlx_eco_register(struct eco_context *eco_ctx, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size)
+int mlx_eco_register(struct eco_context *eco_ctx, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size, int threadid)
 {
 	dbg_log("mlx_eco_register: eco_ctx = %p , data = %p, coding = %p, block_size = %d\n", eco_ctx, data, coding, block_size);
 
@@ -505,20 +522,20 @@ int mlx_eco_register(struct eco_context *eco_ctx, uint8_t **data, uint8_t **codi
 		return -1;
 	}
 
-	eco_ctx->block_size = block_size;
+	eco_ctx->block_size[threadid] = block_size;
 
 	if (block_size < 64) {
 		goto success;
 	}
 
-	eco_ctx->alignment_mem.block_size = block_size - (block_size % 64);
+	eco_ctx->alignment_mem[threadid].block_size = block_size - (block_size % 64);
 
-	err = utill_mlx_eco_alloc_mrs(eco_ctx, data, eco_ctx->alignment_mem.data_blocks, &eco_ctx->alignment_mem.num_data_sge, data_size);
+	err = utill_mlx_eco_alloc_mrs(eco_ctx, data, eco_ctx->alignment_mem[threadid].data_blocks, &eco_ctx->alignment_mem[threadid].num_data_sge, data_size, threadid);
 	if (err) {
 		return err;
 	}
 
-	err = utill_mlx_eco_alloc_mrs(eco_ctx, coding, eco_ctx->alignment_mem.code_blocks, &eco_ctx->alignment_mem.num_code_sge, coding_size);
+	err = utill_mlx_eco_alloc_mrs(eco_ctx, coding, eco_ctx->alignment_mem[threadid].code_blocks, &eco_ctx->alignment_mem[threadid].num_code_sge, coding_size, threadid);
 	if (err) {
 		return err;
 	}
@@ -530,10 +547,12 @@ success:
 	return 0;
 }
 
+// called by one thread
 int mlx_eco_release(struct eco_context *eco_ctx)
 {
 	dbg_log("mlx_eco_release: eco_ctx = %p \n", eco_ctx);
 
+	int i;
 	if (!eco_ctx) {
 		err_log("mlx_eco_release: got null eco_context\n");
 		return -1;
@@ -547,37 +566,39 @@ int mlx_eco_release(struct eco_context *eco_ctx)
 		eco_ctx->calc = NULL;
 	}
 
-	 pthread_mutex_destroy(&eco_ctx->async_mutex);
-	 pthread_cond_destroy(&eco_ctx->async_cond);
+	pthread_mutex_destroy(&eco_ctx->async_mutex);
+	pthread_cond_destroy(&eco_ctx->async_cond);
 
-	if (eco_ctx->alignment_mem.code_blocks) {
-		free(eco_ctx->alignment_mem.code_blocks);
-		eco_ctx->alignment_mem.code_blocks = NULL;
-	}
+	for (i=0; i<MAX_THREADS; i++) { 
+		if (eco_ctx->alignment_mem[i].code_blocks) {
+			free(eco_ctx->alignment_mem[i].code_blocks);
+			eco_ctx->alignment_mem[i].code_blocks = NULL;
+		}
 
-	if (eco_ctx->alignment_mem.data_blocks) {
-		free(eco_ctx->alignment_mem.data_blocks);
-		eco_ctx->alignment_mem.data_blocks = NULL;
-	}
+		if (eco_ctx->alignment_mem[i].data_blocks) {
+			free(eco_ctx->alignment_mem[i].data_blocks);
+			eco_ctx->alignment_mem[i].data_blocks = NULL;
+		}
 
-	if (eco_ctx->remainder_mem.code_blocks) {
-		free(eco_ctx->remainder_mem.code_blocks);
-		eco_ctx->remainder_mem.code_blocks = NULL;
-	}
+		if (eco_ctx->remainder_mem[i].code_blocks) {
+			free(eco_ctx->remainder_mem[i].code_blocks);
+			eco_ctx->remainder_mem[i].code_blocks = NULL;
+		}
 
-	if (eco_ctx->remainder_mem.data_blocks) {
-		free(eco_ctx->remainder_mem.data_blocks);
-		eco_ctx->remainder_mem.data_blocks = NULL;
-	}
+		if (eco_ctx->remainder_mem[i].data_blocks) {
+			free(eco_ctx->remainder_mem[i].data_blocks);
+			eco_ctx->remainder_mem[i].data_blocks = NULL;
+		}
 
-	if (eco_ctx->remainder_buffers) {
-		free(eco_ctx->remainder_buffers);
-		eco_ctx->remainder_buffers = NULL;
-	}
+		if (eco_ctx->remainder_buffers[i]) {
+			free(eco_ctx->remainder_buffers[i]);
+			eco_ctx->remainder_buffers[i] = NULL;
+		}
 
-	if (eco_ctx->remainder_mr) {
-		ibv_dereg_mr(eco_ctx->remainder_mr);
-		eco_ctx->remainder_mr = NULL;
+		if (eco_ctx->remainder_mr[i]) {
+			ibv_dereg_mr(eco_ctx->remainder_mr[i]);
+			eco_ctx->remainder_mr[i] = NULL;
+		}
 	}
 
 	if (eco_ctx->attr.encode_matrix) {
@@ -590,7 +611,9 @@ int mlx_eco_release(struct eco_context *eco_ctx)
 		eco_ctx->int_encode_matrix = NULL;
 	}
 
-	eco_list_delete_all(&eco_ctx->mrs_list);
+	for (i=0; i<MAX_THREADS; i++) {
+		eco_list_delete_all(&eco_ctx->mrs_list[i]);
+	}
 
 	if (pd) {
 		ibv_dealloc_pd(pd);

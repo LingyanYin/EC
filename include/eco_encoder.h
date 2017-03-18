@@ -62,7 +62,7 @@ struct eco_encoder *mlx_eco_encoder_init(int k, int m, int use_vandermonde_matri
  * @param block_size                     Length of each block of data.
  * @return                               0 successful, other fail.
  */
-int mlx_eco_encoder_register(struct eco_encoder *eco_encoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size);
+int mlx_eco_encoder_register(struct eco_encoder *eco_encoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size, int threadid);
 
 /**
  * Generates blocks of encoded data from the data buffers and store them in the coding array.
@@ -76,7 +76,7 @@ int mlx_eco_encoder_register(struct eco_encoder *eco_encoder, uint8_t **data, ui
  * @param block_size                     Length of each block of data.
  * @return                               0 successful, other fail.
  */
-int mlx_eco_encoder_encode(struct eco_encoder *eco_encoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size);
+int mlx_eco_encoder_encode(struct eco_encoder *eco_encoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size, int threadid);
 
 /**
  * Release all EC encoder resources.

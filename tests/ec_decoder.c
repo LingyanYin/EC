@@ -31,7 +31,7 @@
  */
 
 #include "ec_common.h"
-#include <ecOffload/eco_decoder.h>
+#include <eco_decoder.h>
 
 struct decoder_context {
 	struct ibv_context	*context;
@@ -315,7 +315,7 @@ static int decode_file(struct decoder_context *ctx, struct eco_decoder *lib_deco
 
 		// LIB
 		zero_erasures(ec_ctx, ec_ctx->data.buf, ec_ctx->code.buf);
-		err = mlx_eco_decoder_decode(lib_decoder, ec_ctx->data_arr, ec_ctx->code_arr, ec_ctx->attr.k, ec_ctx->attr.m, ec_ctx->block_size, erasures_arr, num_erasures);
+		err = mlx_eco_decoder_decode(lib_decoder, ec_ctx->data_arr, ec_ctx->code_arr, ec_ctx->attr.k, ec_ctx->attr.m, ec_ctx->block_size, erasures_arr, num_erasures, 0);
 
 		wbytes = write(ctx->outfd_data_eco, ec_ctx->data.buf, dbytes);
 		if (wbytes < dbytes) {
@@ -400,7 +400,7 @@ int main(int argc, char *argv[])
 	}
 
 	// register buffers
-	err = mlx_eco_decoder_register(lib_decoder, ctx->ec_ctx->data_arr, ctx->ec_ctx->code_arr, in.k, in.m, ctx->ec_ctx->block_size);
+	err = mlx_eco_decoder_register(lib_decoder, ctx->ec_ctx->data_arr, ctx->ec_ctx->code_arr, in.k, in.m, ctx->ec_ctx->block_size, 0);
 	if (err) {
 		err_log("mlx_ec_register_mrs failed to register\n");
 		return -ENOMEM;

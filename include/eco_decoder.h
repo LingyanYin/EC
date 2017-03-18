@@ -72,7 +72,7 @@ struct eco_decoder *mlx_eco_decoder_init(int k, int m, int use_vandermonde_matri
  * @param block_size                Length of each block of data.
  * @return                          0 successful, other fail.
  */
-int mlx_eco_decoder_register(struct eco_decoder *eco_decoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size);
+int mlx_eco_decoder_register(struct eco_decoder *eco_decoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size, int threadid);
 
 /**
  * Generate k*k decoding matrix by taking the rows corresponding to k non-erased devices of the
@@ -102,7 +102,7 @@ int mlx_eco_decoder_generate_decode_matrix(struct eco_decoder *eco_decoder, int 
  * @param erasures_size             Size of erasures bit-map.
  * @return                          0 successful, other fail.
  */
-int mlx_eco_decoder_decode(struct eco_decoder *eco_decoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size, int *erasures, int erasures_size);
+int mlx_eco_decoder_decode(struct eco_decoder *eco_decoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size, int *erasures, int erasures_size, int threadid);
 
 /**
  * Release all EC decoder resources.

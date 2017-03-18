@@ -33,10 +33,15 @@
 #include <jerasure.h>
 #include <infiniband/verbs_exp.h>
 
+#ifndef dbg_log
 #define dbg_log                               if (0) printf
+#endif
+#ifndef dbg_err
 #define err_log                               printf
+#endif
 
 #define W 4
+#define MAX_THREADS 128
 
 /**
  * Erasure Coding Offload completion context. Used for async encode/decode operations.
@@ -49,6 +54,7 @@ struct eco_coder_comp {
 	struct ibv_exp_ec_comp                   comp;
 	void                                     *eco_coder;
 	int                                      is_remainder_comp;
+	int threadid;
 };
 
 /**
@@ -73,20 +79,20 @@ struct eco_coder_comp {
 struct eco_context {
 	struct ibv_exp_ec_calc                    *calc;
 	struct ibv_exp_ec_calc_init_attr          attr;
-	struct ibv_exp_ec_mem                     alignment_mem;
-	eco_list                                  mrs_list;
+	struct ibv_exp_ec_mem                     alignment_mem[MAX_THREADS];
+	eco_list                                  mrs_list[MAX_THREADS];
 	int                                       *int_encode_matrix;
-	uint8_t                                   *remainder_buffers;
-	struct ibv_exp_ec_mem                     remainder_mem;
-	struct ibv_mr                             *remainder_mr;
-	int                                       block_size;
+	uint8_t                                   *remainder_buffers[MAX_THREADS];
+	struct ibv_exp_ec_mem                     remainder_mem[MAX_THREADS];
+	struct ibv_mr                             *remainder_mr[MAX_THREADS];
+	int                                       block_size[MAX_THREADS];
 	pthread_mutex_t                           async_mutex;
 	pthread_cond_t                            async_cond;
 	int                                       async_ref_count;
-	uint8_t                                   **data;
-	uint8_t                                   **coding;
-	struct eco_coder_comp                     alignment_comp;
-	struct eco_coder_comp                     remainder_comp;
+	uint8_t                                   **data[MAX_THREADS];
+	uint8_t                                   **coding[MAX_THREADS];
+	struct eco_coder_comp                     alignment_comp[MAX_THREADS];
+	struct eco_coder_comp                     remainder_comp[MAX_THREADS];
 };
 
 /**
@@ -115,7 +121,7 @@ struct eco_context *mlx_eco_init(void *coder, int k, int m, int use_vandermonde_
  * @param block_size                         Length of each block of data.
  * @return                                   0 successful, other fail.
  */
-int mlx_eco_register(struct eco_context *eco_ctx, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size);
+int mlx_eco_register(struct eco_context *eco_ctx, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size, int threadid);
 
 /**
  * Release all EC context resources.

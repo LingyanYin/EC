@@ -17,13 +17,13 @@
 
 #include "../include/eco_encoder.h"
 
-static inline void util_mlx_eco_encoder_prepare_remainder_data(struct eco_context *eco_context, uint8_t **data, uint8_t **coding, int remainder, int aligned_block_size)
+static inline void util_mlx_eco_encoder_prepare_remainder_data(struct eco_context *eco_context, uint8_t **data, uint8_t **coding, int remainder, int aligned_block_size, int threadid)
 {
 	int i;
-	eco_context->coding = coding;
+	eco_context->coding[threadid] = coding;
 
 	for (i = 0 ; i < eco_context->attr.k ; i++) {
-		memcpy((void *)eco_context->remainder_mem.data_blocks[i].addr, data[i] + aligned_block_size, remainder);
+		memcpy((void *)eco_context->remainder_mem[threadid].data_blocks[i].addr, data[i] + aligned_block_size, remainder);
 	}
 }
 
@@ -31,11 +31,12 @@ static void util_mlx_eco_encoder_comp_done(struct ibv_exp_ec_comp *comp)
 {
 	struct eco_coder_comp *coder_comp = (void *)comp - offsetof(struct eco_coder_comp, comp);
 	struct eco_context *eco_context = ((struct eco_encoder *)coder_comp->eco_coder)->eco_ctx;
-	int i, remainder = eco_context->block_size % 64, aligned_block_size = eco_context->block_size - remainder;
+	int threadid = coder_comp->threadid;
+	int i, remainder = eco_context->block_size[threadid] % 64, aligned_block_size = eco_context->block_size[threadid] - remainder;
 
 	if (coder_comp->is_remainder_comp) {
 		for (i = 0 ; i < eco_context->attr.m ; i++) {
-			memcpy(eco_context->coding[i] + aligned_block_size, (void *)eco_context->remainder_mem.code_blocks[i].addr, remainder);
+			memcpy(eco_context->coding[threadid][i] + aligned_block_size, (void *)eco_context->remainder_mem[threadid].code_blocks[i].addr, remainder);
 		}
 	}
 
@@ -48,6 +49,7 @@ static void util_mlx_eco_encoder_comp_done(struct ibv_exp_ec_comp *comp)
 	pthread_mutex_unlock(&eco_context->async_mutex);
 }
 
+// called by one thread
 struct eco_encoder *mlx_eco_encoder_init(int k, int m, int use_vandermonde_matrix)
 {
 	dbg_log("mlx_eco_encoder_init: k = %d, m = %d, use_vandermonde_matrix = %d\n", k , m, use_vandermonde_matrix);
@@ -79,19 +81,21 @@ allocate_encoder_error:
 	return NULL;
 }
 
-int mlx_eco_encoder_register(struct eco_encoder *eco_encoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size)
+// called by each thread
+int mlx_eco_encoder_register(struct eco_encoder *eco_encoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size, int threadid)
 {
 	dbg_log("mlx_eco_encoder_register: eco_encoder = %p , block_size = %d, data = %p, data_size = %d, coding = %p, coding_size = %d\n", eco_encoder, block_size , data, data_size, coding, coding_size);
 
 	int err;
-	err = mlx_eco_register(eco_encoder->eco_ctx, data, coding, data_size, coding_size, block_size);
+	err = mlx_eco_register(eco_encoder->eco_ctx, data, coding, data_size, coding_size, block_size, threadid);
 
 	dbg_log("mlx_eco_encoder_register: completed with result = %d, eco_encoder = %p , block_size = %d, data = %p, data_size = %d, coding = %p, coding_size = %d\n", err, eco_encoder, block_size , data, data_size, coding, coding_size);
 
 	return err;
 }
 
-int mlx_eco_encoder_encode(struct eco_encoder *eco_encoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size)
+// called by each thread
+int mlx_eco_encoder_encode(struct eco_encoder *eco_encoder, uint8_t **data, uint8_t **coding, int data_size, int coding_size, int block_size, int threadid)
 {
 	dbg_log("mlx_eco_encoder_encode: eco_encoder = %p , block_size = %d, data = %p, data_size = %d, coding = %p, coding_size = %d\n", eco_encoder, block_size , data, data_size, coding, coding_size);
 
@@ -110,7 +114,7 @@ int mlx_eco_encoder_encode(struct eco_encoder *eco_encoder, uint8_t **data, uint
 		return -1;
 	}
 
-	err = mlx_eco_register(eco_context, data, coding, data_size, coding_size, block_size);
+	err = mlx_eco_register(eco_context, data, coding, data_size, coding_size, block_size, threadid);
 	if (err) {
 		err_log("mlx_eco_encoder_encode: MR allocation failed\n");
 		return err;
@@ -119,8 +123,8 @@ int mlx_eco_encoder_encode(struct eco_encoder *eco_encoder, uint8_t **data, uint
 	pthread_mutex_lock(&eco_context->async_mutex);
 
 	if (remainder) {
-		util_mlx_eco_encoder_prepare_remainder_data(eco_context, data, coding, remainder, aligned_block_size);
-		err = ibv_exp_ec_encode_async(eco_context->calc, &eco_context->remainder_mem, &eco_context->remainder_comp.comp);
+		util_mlx_eco_encoder_prepare_remainder_data(eco_context, data, coding, remainder, aligned_block_size, threadid);
+		err = ibv_exp_ec_encode_async(eco_context->calc, &eco_context->remainder_mem[threadid], &eco_context->remainder_comp[threadid].comp);
 		if (err) {
 			goto encode_error;
 		}
@@ -128,7 +132,7 @@ int mlx_eco_encoder_encode(struct eco_encoder *eco_encoder, uint8_t **data, uint
 	}
 
 	if (aligned_block_size) {
-		err = ibv_exp_ec_encode_async(eco_context->calc, &eco_context->alignment_mem, &eco_context->alignment_comp.comp);
+		err = ibv_exp_ec_encode_async(eco_context->calc, &eco_context->alignment_mem[threadid], &eco_context->alignment_comp[threadid].comp);
 		if (err) {
 			goto encode_error;
 		}
@@ -138,7 +142,8 @@ int mlx_eco_encoder_encode(struct eco_encoder *eco_encoder, uint8_t **data, uint
 	pthread_cond_wait(&eco_context->async_cond, &eco_context->async_mutex);
 	pthread_mutex_unlock(&eco_context->async_mutex);
 
-	if ((err = (int)eco_context->alignment_comp.comp.status | (int)eco_context->remainder_comp.comp.status)) {
+	// inside the lock??
+	if ((err = (int)eco_context->alignment_comp[threadid].comp.status | (int)eco_context->remainder_comp[threadid].comp.status)) {
 		goto encode_error;
 	}
 
@@ -157,6 +162,8 @@ encode_error:
 	return err;
 }
 
+// called by one thread
+// attention: resources must be destroyed after all threads finish
 int mlx_eco_encoder_release(struct eco_encoder *eco_encoder)
 {
 	dbg_log("mlx_eco_encoder_release: eco_encoder = %p\n", eco_encoder);

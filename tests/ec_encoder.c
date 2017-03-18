@@ -31,7 +31,7 @@
  */
 
 #include "ec_common.h"
-#include <ecOffload/eco_encoder.h>
+#include <eco_encoder.h>
 
 struct encoder_context {
 	struct ibv_context	*context;
@@ -282,7 +282,7 @@ static int encode_file(struct encoder_context *ctx, struct eco_encoder *lib_enco
 
 		// library encode
 		memset(ec_ctx->code.buf, 0, ec_ctx->block_size * ec_ctx->attr.m);
-		err = mlx_eco_encoder_encode(lib_encoder, ec_ctx->data_arr, ec_ctx->code_arr, ec_ctx->attr.k, ec_ctx->attr.m, ec_ctx->block_size);
+		err = mlx_eco_encoder_encode(lib_encoder, ec_ctx->data_arr, ec_ctx->code_arr, ec_ctx->attr.k, ec_ctx->attr.m, ec_ctx->block_size, 0);
 		bytes = write(ctx->outfd_eco, ec_ctx->code.buf,
 				ec_ctx->block_size * ec_ctx->attr.m);
 		if (bytes < (int)ec_ctx->block_size * ec_ctx->attr.m) {
@@ -343,7 +343,7 @@ int main(int argc, char *argv[])
 	}
 
 	// register buffers
-	err = mlx_eco_encoder_register(lib_encoder, ctx->ec_ctx->data_arr, ctx->ec_ctx->code_arr, in.k, in.m, ctx->ec_ctx->block_size);
+	err = mlx_eco_encoder_register(lib_encoder, ctx->ec_ctx->data_arr, ctx->ec_ctx->code_arr, in.k, in.m, ctx->ec_ctx->block_size, 0);
 	if (err) {
 		err_log("mlx_ec_register_mrs failed to register\n");
 		return -ENOMEM;
