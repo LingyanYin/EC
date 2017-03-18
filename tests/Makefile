@@ -3,8 +3,9 @@ PREFIX = /usr
 sbindir = bin
 
 CC = gcc
-CFLAGS += -g -ggdb -Wall -W -D_GNU_SOURCE -I /usr/include/jerasure
-LDFLAGS = -libverbs -lgf_complete -lJerasure -lpthread -lrdmacm -lecOffload
+CFLAGS += -g -ggdb -Wall -W -D_GNU_SOURCE -I ${HOME}/local/jerasure/include -I ${HOME}/github/EC/include
+#LDFLAGS = -libverbs -lgf_complete -lJerasure -lpthread -lrdmacm -lecOffload
+LDFLAGS += -L${LD_LIBRARY_PATH} -libverbs -lpthread -lrdmacm  -l:../build/libecOffload.so -l:${HOME}/local/jerasure/src/.libs/libJerasure.so
 
 
 OBJECTS_LAT = ec_encoder.o ec_decoder.o ec_common.o common.o ec_capability_test.o

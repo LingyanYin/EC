@@ -10,12 +10,12 @@ INCLUDE_DIR = include/
 LIB_NAME = libecOffload.so
 
 #compilation flags
-LDFLAGS = -lJerasure -libverbs
+LDFLAGS = -L${LD_LIBRARY_PATH} -libverbs
 CFLAGS += -g -ggdb -Wall -W -D_GNU_SOURCE
 CC = gcc
 
 #include jerasure path
-INC= -I /usr/include/jerasure
+INC= -I ${HOME}/local/jerasure/include 
 
 TARGETS = mlx_eco_library
 
