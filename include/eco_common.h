@@ -34,8 +34,8 @@
 #include <infiniband/verbs_exp.h>
 
 #ifndef dbg_log
-//#define dbg_log                               if (0) printf
-#define dbg_log                               printf
+#define dbg_log                               if (0) printf
+//#define dbg_log                               printf
 #endif
 #ifndef dbg_err
 #define err_log                               printf
