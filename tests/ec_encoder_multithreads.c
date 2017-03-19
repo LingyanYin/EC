@@ -42,7 +42,7 @@ struct encoder_context {
 	struct ibv_context	*context;
 	struct ibv_pd		*pd;
 	struct ec_context	*ec_ctx;
-	int			infd;
+	int			infd[NUM_THR];
 	int			outfd_sw[NUM_THR];
 	int			outfd_verbs[NUM_THR];
 	int			outfd_eco[NUM_THR];
@@ -61,8 +61,8 @@ static void close_io_files(struct encoder_context *ctx)
 		close(ctx->outfd_sw[i]);
 		close(ctx->outfd_verbs[i]);
 		close(ctx->outfd_eco[i]);
+		close(ctx->infd[i]);
 	}
-	close(ctx->infd);
 }
 
 static int open_io_files(struct inargs *in, struct encoder_context *ctx, int mytid)
@@ -70,9 +70,30 @@ static int open_io_files(struct inargs *in, struct encoder_context *ctx, int myt
 	char *outfile;
 	int err = 0;
 
-	ctx->infd = open(in->datafile, O_RDONLY);
-	if (ctx->infd < 0) {
+	char tid[4];
+	memset(tid, 0, sizeof(char)*4);
+	//itoa(mytid, tid, 10);
+	snprintf(tid, 4,"%d",mytid);
+	char filename[128];
+	strcpy(filename, in->datafile);
+	strcat(filename, ".");
+	strcat(filename, tid);
+	// | O_RDWR
+	ctx->infd[mytid] = open(filename, O_CREAT | O_RDWR, 0766);
+	if (ctx->infd[mytid] < 0) {
 		err_log("Failed to open file\n");
+		return -EIO;
+	}
+	
+	char buf[128];
+	strcpy(buf, "Lingyan Yin ");
+	strcat(buf, tid);
+	int bytes = -1;
+	if((bytes = write(ctx->infd[mytid], buf, 16)) > 0) {
+		printf("mytid: %d: %d bytes written\n", mytid, bytes);
+	}
+	if (lseek(ctx->infd[mytid], 0, SEEK_SET) == -1) {
+		err_log("Failed to reset the position\n");
 		return -EIO;
 	}
 
@@ -83,10 +104,6 @@ static int open_io_files(struct inargs *in, struct encoder_context *ctx, int myt
 		goto close_infd;
 	}
 
-	char tid[4];
-	memset(tid, 0, sizeof(char)*4);
-	//itoa(mytid, tid, 10);
-	snprintf(tid, 4,"%d",mytid);
 	outfile = strcat(outfile, in->datafile);
 	outfile = strcat(outfile, ".");
 	outfile = strcat(outfile, tid);
@@ -146,7 +163,7 @@ static int open_io_files(struct inargs *in, struct encoder_context *ctx, int myt
 	return 0;
 
 close_infd:
-	close(ctx->infd);
+	close(ctx->infd[mytid]);
 
 	return err;
 }
@@ -275,8 +292,13 @@ static int encode_file(struct encoder_context *ctx, struct eco_encoder *lib_enco
 	int err;
 
 	while (1) {
-		bytes = read(ctx->infd, ec_ctx->data[mytid].buf,
+		bytes = read(ctx->infd[mytid], ec_ctx->data[mytid].buf,
 				ec_ctx->block_size[mytid] * ec_ctx->attr.k);
+		if (mytid == 0) {
+			info_log("mytid: %d: read %d bytes, block_size %d attr.k %d.\n", mytid, bytes, 
+					ec_ctx->block_size[mytid], ec_ctx->attr.k);
+			perror("flush");
+		}
 		if (bytes <= 0)
 			break;
 
@@ -288,6 +310,8 @@ static int encode_file(struct encoder_context *ctx, struct eco_encoder *lib_enco
 
 		bytes = write(ctx->outfd_verbs[mytid], ec_ctx->code[mytid].buf,
 				ec_ctx->block_size[mytid] * ec_ctx->attr.m);
+		if (mytid == 0)
+			info_log("ib - mytid: %d: write %d bytes.", mytid, bytes);
 		if (bytes < (int)ec_ctx->block_size[mytid] * ec_ctx->attr.m) {
 			err_log("Failed write to fd1 (%d)\n", err);
 			return err;
@@ -302,6 +326,8 @@ static int encode_file(struct encoder_context *ctx, struct eco_encoder *lib_enco
 
 		bytes = write(ctx->outfd_sw[mytid], ec_ctx->code[mytid].buf,
 				ec_ctx->block_size[mytid] * ec_ctx->attr.m);
+		if (mytid == 0)
+			info_log("sw - mytid: %d: write %d bytes.", mytid, bytes);
 		if (bytes < (int)ec_ctx->block_size[mytid] * ec_ctx->attr.m) {
 			err_log("Failed write to fd2 (%d)\n", err);
 			return err;
@@ -312,6 +338,8 @@ static int encode_file(struct encoder_context *ctx, struct eco_encoder *lib_enco
 		err = mlx_eco_encoder_encode(lib_encoder, ec_ctx->data_arr[mytid], ec_ctx->code_arr[mytid], ec_ctx->attr.k, ec_ctx->attr.m, ec_ctx->block_size[mytid], mytid);
 		bytes = write(ctx->outfd_eco[mytid], ec_ctx->code[mytid].buf,
 				ec_ctx->block_size[mytid] * ec_ctx->attr.m);
+		if (mytid == 0)
+			info_log("lib - mytid: %d: write %d bytes.", mytid, bytes);
 		if (bytes < (int)ec_ctx->block_size[mytid] * ec_ctx->attr.m) {
 			err_log("Failed write to library fd (%d)\n", err);
 			return err;
@@ -406,8 +434,6 @@ int main(int argc, char *argv[])
 			exit(-1);
 		}
 	}
-	//int mytid = atomic_increment(&threadid, 1);
-	//printf("threadid: %d\n", mytid);
 	
 	for (i=0; i<NUM_THR; i++) {
 		rt = pthread_join(threads[i], &status);
@@ -416,7 +442,10 @@ int main(int argc, char *argv[])
 			exit(-1);
 		}
 	}
+	info_log("join successfully.\n");
 	pthread_attr_destroy(&attr);
+
+	info_log("before exit...\n");
 
 	mlx_eco_encoder_release(lib_encoder);
 
@@ -426,6 +455,9 @@ int main(int argc, char *argv[])
 	}
 
 	close_ctx(ctx);
+
+	pthread_exit(NULL);
+	info_log("exit successfully.\n");
 
 	return 0;
 }

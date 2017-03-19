@@ -39,7 +39,7 @@
 #include <jerasure/reed_sol.h>
 #include <gf_complete.h>
 
-#define NUM_THR 28
+#define NUM_THR 2
 
 struct ec_mr {
 	uint8_t				*buf;
